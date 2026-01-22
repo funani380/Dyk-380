@@ -1,0 +1,43 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+========================
+WEEK 13 — EXERCISE 01–04
+========================
+
+--------------------------------
+EXERCISE 01 — Create Project Directory
+--------------------------------
+mkdir week13
+cd week13
+
+
+--------------------------------
+EXERCISE 02 — Configure Virtual Environment
+--------------------------------
+python3 -m venv venv
+source venv/bin/activate
+# Windows alternative:
+# venv\Scripts
+
+
+--------------------------------
+EXERCISE 03 — Install Dependencies
+--------------------------------
+pip install fastapi uvicorn
+
+
+--------------------------------
+EXERCISE 04 — Organise File Structure
+--------------------------------
+mkdir routes
+touch main.py schema.py users.txt routes/__init__.py routes/users.py
+
+# Initialize users.txt with an empty JSON list:
+echo "[]" > users.txt
+
+
+
