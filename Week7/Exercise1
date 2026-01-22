@@ -1,0 +1,202 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Optional
+
+
+CATEGORY_DISCOUNTS = {
+    "electronics": 0.10,
+    "clothing": 0.15,
+    "books": 0.05,
+    "home": 0.12,
+}
+
+TIER_DISCOUNTS = {
+    "premium": 0.05,
+    "standard": 0.00,
+    "budget": 0.02,
+}
+
+
+@dataclass(frozen=True)
+class Product:
+    name: str
+    base_price: float
+    category: str
+    tier: str
+
+
+@dataclass(frozen=True)
+class PricingResult:
+    product: Product
+    category_rate: float
+    tier_rate: float
+    total_rate: float
+    discount_amount: float
+    final_price: float
+
+
+def normalize_text(s: str) -> str:
+    return " ".join(s.strip().split())
+
+
+def parse_product_line(line: str, line_no: int) -> Optional[Product]:
+    """
+    Parse one line: ProductName,BasePrice,Category,DiscountTier
+    Robustness:
+      - ignores blank lines and comment lines starting with '#'
+      - uses maxsplit=3 so product names *could* include commas safely
+    """
+    raw = line.strip()
+    if not raw or raw.startswith("#"):
+        return None
+
+    parts = [p.strip() for p in raw.split(",", maxsplit=3)]
+    if len(parts) != 4:
+        raise ValueError(f"Line {line_no}: expected 4 comma-separated fields, got {len(parts)} -> {raw!r}")
+
+    name, price_str, category, tier = parts
+    name = normalize_text(name)
+    category = normalize_text(category)
+    tier = normalize_text(tier)
+
+    if not name:
+        raise ValueError(f"Line {line_no}: product name is empty")
+
+    try:
+        base_price = float(price_str)
+    except ValueError as e:
+        raise ValueError(f"Line {line_no}: invalid BasePrice {price_str!r}") from e
+
+    if base_price < 0:
+        raise ValueError(f"Line {line_no}: BasePrice must be >= 0, got {base_price}")
+
+    return Product(
+        name=name,
+        base_price=base_price,
+        category=category,
+        tier=tier,
+    )
+
+
+def compute_pricing(product: Product) -> PricingResult:
+    cat_key = product.category.strip().lower()
+    tier_key = product.tier.strip().lower()
+
+    if cat_key not in CATEGORY_DISCOUNTS:
+        raise ValueError(f"Unknown category {product.category!r}. Allowed: {', '.join(CATEGORY_DISCOUNTS.keys())}")
+    if tier_key not in TIER_DISCOUNTS:
+        raise ValueError(f"Unknown discount tier {product.tier!r}. Allowed: {', '.join(TIER_DISCOUNTS.keys())}")
+
+    category_rate = CATEGORY_DISCOUNTS[cat_key]
+    tier_rate = TIER_DISCOUNTS[tier_key]
+    total_rate = category_rate + tier_rate
+
+    # Safety clamp (discounts should not exceed 95% in real systems)
+    total_rate = min(total_rate, 0.95)
+
+    discount_amount = product.base_price * total_rate
+    final_price = product.base_price - discount_amount
+
+    return PricingResult(
+        product=product,
+        category_rate=category_rate,
+        tier_rate=tier_rate,
+        total_rate=total_rate,
+        discount_amount=discount_amount,
+        final_price=final_price,
+    )
+
+
+def write_report(report_path: str, results: list[PricingResult]) -> None:
+    header = (
+        "PRICING REPORT\n"
+        + "-" * 110 + "\n"
+        + f"{'Product':<32} {'Category':<12} {'Tier':<10} {'Base (€)':>10} "
+          f"{'Disc %':>8} {'Disc (€)':>12} {'Final (€)':>12}\n"
+        + "-" * 110 + "\n"
+    )
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(header)
+        for r in results:
+            f.write(
+                f"{r.product.name:<32.32} "
+                f"{r.product.category:<12.12} "
+                f"{r.product.tier:<10.10} "
+                f"{r.product.base_price:>10.2f} "
+                f"{(r.total_rate * 100):>7.2f}% "
+                f"{r.discount_amount:>12.2f} "
+                f"{r.final_price:>12.2f}\n"
+            )
+
+
+def main() -> None:
+    input_file = "products.txt"
+    output_file = "pricing_report.txt"
+
+    processed: list[PricingResult] = []
+    skipped = 0
+    errors: list[str] = []
+
+    try:
+        with open(input_file, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                try:
+                    product = parse_product_line(line, line_no)
+                    if product is None:
+                        continue
+                    result = compute_pricing(product)
+                    processed.append(result)
+                except ValueError as e:
+                    skipped += 1
+                    errors.append(str(e))
+    except FileNotFoundError:
+        print(f"ERROR: Missing input file: {input_file}")
+        return
+
+    # Write report with permission handling
+    try:
+        write_report(output_file, processed)
+    except PermissionError:
+        print(f"ERROR: No permission to write report: {output_file}")
+        return
+
+    # Console summary (required)
+    if processed:
+        avg_discount_pct = sum(r.total_rate for r in processed) / len(processed) * 100
+        avg_discount_amt = sum(r.discount_amount for r in processed) / len(processed)
+    else:
+        avg_discount_pct = 0.0
+        avg_discount_amt = 0.0
+
+    print("Pricing processing complete.")
+    print(f"Total products processed: {len(processed)}")
+    print(f"Average discount applied: {avg_discount_pct:.2f}% (avg €{avg_discount_amt:.2f})")
+    if skipped:
+        print(f"Skipped lines due to errors: {skipped}")
+        # Show first few errors (avoid flooding console)
+        for msg in errors[:5]:
+            print(" -", msg)
+        if len(errors) > 5:
+            print(f" - ... ({len(errors) - 5} more)")
+
+    print(f"Report written to: {os.path.abspath(output_file)}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+# In[ ]:
+
+
+
+
