@@ -1,0 +1,99 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+# routes/users.py
+from fastapi import APIRouter, HTTPException, Query, Path, status
+from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Optional
+import re
+
+from user_store import UserStore
+
+router = APIRouter()
+
+
+store = UserStore("users.txt")
+
+
+
+# Models (kept simple)
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+class UserCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=60)
+    email: Optional[str] = Field(default=None, max_length=120)
+    age: Optional[int] = Field(default=None, ge=0, le=130)
+
+class User(UserCreate):
+    id: int
+
+
+
+
+def get_next_id(users: List[Dict[str, Any]]) -> int:
+    if not users:
+        return 1
+    ids = [u.get("id") for u in users if isinstance(u.get("id"), int)]
+    return (max(ids) + 1) if ids else 1
+
+def validate_email(email: Optional[str]) -> None:
+    if email is not None and not EMAIL_RE.match(email):
+        raise HTTPException(status_code=422, detail="Invalid email format")
+
+
+
+
+@router.get("", response_model=List[User])
+def get_users():
+    return store.load()
+
+
+@router.post("", response_model=User, status_code=status.HTTP_201_CREATED)
+def create_user(payload: UserCreate):
+    validate_email(payload.email)
+
+    users = store.load()
+    new_user = {"id": get_next_id(users), **payload.model_dump()}
+    users.append(new_user)
+    store.save(users)
+    return new_user
+
+
+
+@router.get("/search", response_model=List[User])
+def search_users(q: str = Query(..., min_length=1)):
+    users = store.load()
+    needle = q.lower()
+    return [u for u in users if needle in (u.get("name", "").lower())]
+
+
+@router.get("/{user_id}", response_model=User)
+def get_user_by_id(user_id: int = Path(..., ge=1)):
+    user = store.find_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+# PUT + DELETE will be used in Exercise 04 (extension)
+@router.put("/{user_id}", response_model=Dict[str, Any])
+def update_user(user_id: int = Path(..., ge=1), payload: UserCreate = None):
+    validate_email(payload.email)
+
+    ok = store.update_user(user_id, payload.model_dump())
+    if not ok:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"status": "updated", "id": user_id}
+
+
+@router.delete("/{user_id}", response_model=Dict[str, Any])
+def delete_user(user_id: int = Path(..., ge=1)):
+    ok = store.delete_user(user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"status": "deleted", "id": user_id}
+
