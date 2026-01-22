@@ -1,0 +1,446 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[2]:
+
+
+#!/usr/bin/env python3
+"""
+Week 11 Lab Exercise: EU Capitals Weather Data Collection
+Robust solution with:
+- Iterative API calls for EU capitals
+- Rate limiting (delay + jitter)
+- Retries with exponential backoff
+- Validation of required fields
+- Weather code -> human condition mapping
+- JSON output in the requested nested structure
+BONUS:
+- Timestamp-based caching (TTL)
+- CSV export (hourly rows)
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import logging
+import os
+import random
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone, date
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+
+# ----------------------------
+# 1) Data (from lab sheet page 2)
+# ----------------------------
+EU_CAPITALS = [
+    {"city": "Vienna", "country": "Austria", "lat": 48.2082, "lon": 16.3738},
+    {"city": "Brussels", "country": "Belgium", "lat": 50.8503, "lon": 4.3517},
+    {"city": "Sofia", "country": "Bulgaria", "lat": 42.6977, "lon": 23.3219},
+    {"city": "Zagreb", "country": "Croatia", "lat": 45.8150, "lon": 15.9819},
+    {"city": "Nicosia", "country": "Cyprus", "lat": 35.1856, "lon": 33.3823},
+    {"city": "Prague", "country": "Czechia", "lat": 50.0755, "lon": 14.4378},
+    {"city": "Copenhagen", "country": "Denmark", "lat": 55.6761, "lon": 12.5683},
+    {"city": "Tallinn", "country": "Estonia", "lat": 59.4370, "lon": 24.7536},
+    {"city": "Helsinki", "country": "Finland", "lat": 60.1695, "lon": 24.9354},
+    {"city": "Paris", "country": "France", "lat": 48.8566, "lon": 2.3522},
+    {"city": "Berlin", "country": "Germany", "lat": 52.5200, "lon": 13.4050},
+    {"city": "Athens", "country": "Greece", "lat": 37.9838, "lon": 23.7275},
+    {"city": "Budapest", "country": "Hungary", "lat": 47.4979, "lon": 19.0402},
+    {"city": "Dublin", "country": "Ireland", "lat": 53.3498, "lon": -6.2603},
+    {"city": "Rome", "country": "Italy", "lat": 41.9028, "lon": 12.4964},
+    {"city": "Riga", "country": "Latvia", "lat": 56.9496, "lon": 24.1052},
+    {"city": "Vilnius", "country": "Lithuania", "lat": 54.6872, "lon": 25.2797},
+    {"city": "Luxembourg", "country": "Luxembourg", "lat": 49.6116, "lon": 6.1319},
+    {"city": "Valletta", "country": "Malta", "lat": 35.8989, "lon": 14.5146},
+    {"city": "Amsterdam", "country": "Netherlands", "lat": 52.3676, "lon": 4.9041},
+    {"city": "Warsaw", "country": "Poland", "lat": 52.2297, "lon": 21.0122},
+    {"city": "Lisbon", "country": "Portugal", "lat": 38.7223, "lon": -9.1393},
+    {"city": "Bucharest", "country": "Romania", "lat": 44.4268, "lon": 26.1025},
+    {"city": "Bratislava", "country": "Slovakia", "lat": 48.1486, "lon": 17.1077},
+    {"city": "Ljubljana", "country": "Slovenia", "lat": 46.0569, "lon": 14.5058},
+    {"city": "Madrid", "country": "Spain", "lat": 40.4168, "lon": -3.7038},
+    {"city": "Stockholm", "country": "Sweden", "lat": 59.3293, "lon": 18.0686},
+]
+
+
+# ----------------------------
+# 2) Weather code mapping (WMO-style codes often used by Open-Meteo)
+# ----------------------------
+WEATHER_CODE_TO_CONDITION = {
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Depositing rime fog",
+    51: "Drizzle: light",
+    53: "Drizzle: moderate",
+    55: "Drizzle: dense",
+    56: "Freezing drizzle: light",
+    57: "Freezing drizzle: dense",
+    61: "Rain: slight",
+    63: "Rain: moderate",
+    65: "Rain: heavy",
+    66: "Freezing rain: light",
+    67: "Freezing rain: heavy",
+    71: "Snow fall: slight",
+    73: "Snow fall: moderate",
+    75: "Snow fall: heavy",
+    77: "Snow grains",
+    80: "Rain showers: slight",
+    81: "Rain showers: moderate",
+    82: "Rain showers: violent",
+    85: "Snow showers: slight",
+    86: "Snow showers: heavy",
+    95: "Thunderstorm: slight/moderate",
+    96: "Thunderstorm with hail: slight",
+    99: "Thunderstorm with hail: heavy",
+}
+
+def condition_from_code(code: Any) -> str:
+    try:
+        c = int(code)
+    except (TypeError, ValueError):
+        return "Unknown"
+    return WEATHER_CODE_TO_CONDITION.get(c, "Unknown")
+
+
+# ----------------------------
+# 3) Types
+# ----------------------------
+@dataclass(frozen=True)
+class Capital:
+    city: str
+    country: str
+    lat: float
+    lon: float
+
+
+# ----------------------------
+# 4) Logging setup
+# ----------------------------
+def setup_logging(log_level: str) -> None:
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler("eu_weather_data.log", encoding="utf-8"),
+        ],
+    )
+
+
+# ----------------------------
+# 5) HTTP + Retry (robust)
+# ----------------------------
+def http_get_json(url: str, timeout: int, retries: int, backoff_base: float) -> Dict[str, Any]:
+    """
+    GET JSON with retries + exponential backoff.
+    Raises the final exception if all retries fail.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(retries + 1):
+        try:
+            req = Request(url, headers={"User-Agent": "EUWeatherCollector/1.0"})
+            with urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8")
+            return json.loads(raw)
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as e:
+            last_exc = e
+            wait = backoff_base * (2 ** attempt) + random.uniform(0, 0.25)
+            logging.warning("Request failed (attempt %s/%s): %s", attempt + 1, retries + 1, repr(e))
+            if attempt < retries:
+                time.sleep(wait)
+    assert last_exc is not None
+    raise last_exc
+
+
+# ----------------------------
+# 6) Build Open-Meteo URL (as required by lab sheet)
+# ----------------------------
+def build_open_meteo_url(cap: Capital, target_day: date) -> str:
+    """
+    Build an API call that requests:
+    - current_weather
+    - hourly: temperature_2m, precipitation_probability, weathercode
+    - for current day only (start_date = end_date = target_day)
+    """
+    base = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": cap.lat,
+        "longitude": cap.lon,
+        "current_weather": "true",
+        "hourly": "temperature_2m,precipitation_probability,weathercode",
+        "start_date": target_day.isoformat(),
+        "end_date": target_day.isoformat(),
+        "timezone": "auto",
+    }
+    return f"{base}?{urlencode(params)}"
+
+
+# ----------------------------
+# 7) Transform API response into required output structure
+# ----------------------------
+def transform_response(cap: Capital, data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validates & transforms the raw API response into the hierarchical structure
+    shown in the lab sheet (page 2).
+    """
+    # ---- Current weather
+    current = data.get("current_weather")
+    if not isinstance(current, dict):
+        raise KeyError("Missing or invalid 'current_weather' field")
+
+    # Required fields (based on sheet expected structure)
+    temperature = current.get("temperature")
+    windspeed = current.get("windspeed")
+    weathercode = current.get("weathercode")
+    cur_time = current.get("time")
+
+    if temperature is None or windspeed is None or weathercode is None or cur_time is None:
+        raise KeyError("Missing fields in 'current_weather'")
+
+    # ---- Hourly data
+    hourly = data.get("hourly")
+    if not isinstance(hourly, dict):
+        raise KeyError("Missing or invalid 'hourly' field")
+
+    times = hourly.get("time")
+    temps = hourly.get("temperature_2m")
+    pops = hourly.get("precipitation_probability")
+    codes = hourly.get("weathercode")
+
+    if not (isinstance(times, list) and isinstance(temps, list) and isinstance(pops, list) and isinstance(codes, list)):
+        raise KeyError("Hourly fields are missing or not lists")
+
+    
+    n = min(len(times), len(temps), len(pops), len(codes))
+    hourly_forecast: List[Dict[str, Any]] = []
+    for i in range(n):
+        hourly_forecast.append(
+            {
+                "time": times[i],
+                "temperature": temps[i],
+                "precipitation_probability": pops[i],
+                "weathercode": codes[i],
+            }
+        )
+
+
+    out = {
+        "country": cap.country,
+        "coordinates": {"latitude": cap.lat, "longitude": cap.lon},
+        "current_weather": {
+            "temperature": temperature,
+            "windspeed": windspeed,
+            "weathercode": weathercode,
+            "condition": condition_from_code(weathercode),
+            "time": cur_time,
+        },
+        "hourly_forecast": hourly_forecast,
+    }
+    return out
+
+
+# ----------------------------
+# 8) Caching (BONUS from sheet page 3)
+# ----------------------------
+def cache_paths(cache_dir: Path, cap: Capital) -> Tuple[Path, Path]:
+    """
+    Returns (meta_path, data_path) for a city cache.
+    """
+    safe = cap.city.replace(" ", "_").lower()
+    return (
+        cache_dir / f"{safe}.meta.json",
+        cache_dir / f"{safe}.data.json",
+    )
+
+def load_from_cache(cache_dir: Path, cap: Capital, ttl_seconds: int) -> Optional[Dict[str, Any]]:
+    meta_path, data_path = cache_paths(cache_dir, cap)
+    if not meta_path.exists() or not data_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        fetched_at = meta.get("fetched_at_utc")
+        if not fetched_at:
+            return None
+        fetched_dt = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - fetched_dt).total_seconds()
+        if age > ttl_seconds:
+            return None
+        return json.loads(data_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logging.warning("Cache read failed for %s: %s", cap.city, repr(e))
+        return None
+
+def save_to_cache(cache_dir: Path, cap: Capital, transformed: Dict[str, Any]) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    meta_path, data_path = cache_paths(cache_dir, cap)
+    meta = {"fetched_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    data_path.write_text(json.dumps(transformed, indent=2), encoding="utf-8")
+
+
+# ----------------------------
+# 9) Atomic JSON write
+# ----------------------------
+def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+# ----------------------------
+# 10) CSV export (BONUS)
+# ----------------------------
+def export_hourly_csv(out_csv: Path, all_data: Dict[str, Any]) -> None:
+    """
+    Writes a "long format" CSV:
+    city,country,time,temperature,precipitation_probability,weathercode,condition
+    """
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with out_csv.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["city", "country", "time", "temperature", "precipitation_probability", "weathercode", "condition"])
+        for city, block in all_data.items():
+            country = block.get("country")
+            for row in block.get("hourly_forecast", []):
+                code = row.get("weathercode")
+                w.writerow([
+                    city,
+                    country,
+                    row.get("time"),
+                    row.get("temperature"),
+                    row.get("precipitation_probability"),
+                    code,
+                    condition_from_code(code),
+                ])
+
+
+# ----------------------------
+# 11) Main collection loop (meets sheet requirements)
+# ----------------------------
+def collect_weather(
+    capitals: List[Capital],
+    delay_seconds: float,
+    timeout: int,
+    retries: int,
+    backoff_base: float,
+    use_cache: bool,
+    cache_dir: Path,
+    cache_ttl: int,
+) -> Dict[str, Any]:
+    results: Dict[str, Any] = {}
+    today_utc = datetime.now(timezone.utc).date()
+
+    for idx, cap in enumerate(capitals, start=1):
+        logging.info("(%s/%s) Processing %s, %s", idx, len(capitals), cap.city, cap.country)
+
+        # Cache first
+        if use_cache:
+            cached = load_from_cache(cache_dir, cap, cache_ttl)
+            if cached is not None:
+                logging.info("Using cache for %s", cap.city)
+                results[cap.city] = cached
+                continue
+
+        # Build URL and fetch
+        url = build_open_meteo_url(cap, today_utc)
+        try:
+            raw = http_get_json(url=url, timeout=timeout, retries=retries, backoff_base=backoff_base)
+            transformed = transform_response(cap, raw)
+
+            results[cap.city] = transformed
+
+            if use_cache:
+                save_to_cache(cache_dir, cap, transformed)
+
+        except Exception as e:
+            # Required by sheet: log errors but keep going
+            logging.error("Failed for %s (%s): %s", cap.city, cap.country, repr(e))
+
+     
+        sleep_time = max(0.0, delay_seconds + random.uniform(0, 0.15))
+        time.sleep(sleep_time)
+
+    return results
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Collect Open-Meteo weather for EU capitals into JSON (and optional CSV).")
+    p.add_argument("--out-json", default="eu_weather_data.json", help="Output JSON file path.")
+    p.add_argument("--out-csv", default="", help="Optional output CSV file path (leave empty to skip).")
+    p.add_argument("--delay", type=float, default=0.75, help="Delay between API calls (seconds).")
+    p.add_argument("--timeout", type=int, default=15, help="HTTP timeout (seconds).")
+    p.add_argument("--retries", type=int, default=2, help="Number of retries on failure.")
+    p.add_argument("--backoff-base", type=float, default=0.8, help="Exponential backoff base wait (seconds).")
+    p.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR).")
+
+    # BONUS caching
+    p.add_argument("--cache", action="store_true", help="Enable TTL cache to avoid redundant calls.")
+    p.add_argument("--cache-dir", default=".openmeteo_cache", help="Cache directory.")
+    p.add_argument("--cache-ttl", type=int, default=1800, help="Cache TTL in seconds (default 30 minutes).")
+
+    return p.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    setup_logging(args.log_level)
+
+    capitals = [Capital(**c) for c in EU_CAPITALS]
+
+    data = collect_weather(
+        capitals=capitals,
+        delay_seconds=args.delay,
+        timeout=args.timeout,
+        retries=args.retries,
+        backoff_base=args.backoff_base,
+        use_cache=args.cache,
+        cache_dir=Path(args.cache_dir),
+        cache_ttl=args.cache_ttl,
+    )
+
+    out_json = Path(args.out_json)
+    atomic_write_json(out_json, data)
+    logging.info("Wrote JSON: %s (cities collected: %s)", out_json, len(data))
+
+    if args.out_csv.strip():
+        out_csv = Path(args.out_csv)
+        export_hourly_csv(out_csv, data)
+        logging.info("Wrote CSV: %s", out_csv)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
