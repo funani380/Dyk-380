@@ -2,7 +2,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[Excercise 1]:
+# In[Excercise 1 (Grade Calculator)--------------------------------------------------------------------------------------------]:
 
 
 def grade_from_score(score: float) -> str:
@@ -64,7 +64,7 @@ if __name__ == "__main__":
     main()
 
 
-# In[Exercise 2 ]:
+# In[Exercise 2 (Limited Login Attempts) ---------------------------------------------------------------------------------------------------------------------- ]:
 
 
 import time
@@ -111,7 +111,7 @@ if __name__ == "__main__":
     main()
 
 
-# In[Excercise 3 ]:
+# In[Excercise-(Filtering Even Numbers) 3 --------------------------------------------------------------------------------------------------------------------------------------------------]:
 
 
 def evens_only(numbers):
