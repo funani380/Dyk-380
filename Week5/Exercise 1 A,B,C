@@ -1,0 +1,223 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+import string
+import random
+
+
+
+# Part A: Required functions
+
+def check_min_length(password, min_len=8):
+    """Return True if password length >= min_len."""
+    if not isinstance(password, str):
+        return False
+    return len(password) >= min_len
+
+
+def has_uppercase(password):
+    """Return True if password has at least one uppercase letter."""
+    if not isinstance(password, str):
+        return False
+    return any(ch in string.ascii_uppercase for ch in password)
+
+
+def has_lowercase(password):
+    """Return True if password has at least one lowercase letter."""
+    if not isinstance(password, str):
+        return False
+    return any(ch in string.ascii_lowercase for ch in password)
+
+
+def has_digit(password):
+    """Return True if password has at least one digit."""
+    if not isinstance(password, str):
+        return False
+    return any(ch in string.digits for ch in password)
+
+
+def has_special_char(password):
+    """Return True if password has at least one special character."""
+    if not isinstance(password, str):
+        return False
+    return any(ch in string.punctuation for ch in password)
+
+
+
+# Extra (more complex) checks
+
+COMMON_PASSWORDS = {
+    "password", "password123", "12345678", "qwerty123", "letmein", "admin123"
+}
+
+def has_no_whitespace(password):
+    """Extra rule: reject passwords containing spaces/tabs/newlines."""
+    if not isinstance(password, str):
+        return False
+    return not any(ch.isspace() for ch in password)
+
+def not_common_password(password):
+    """Extra rule: reject very common passwords (case-insensitive)."""
+    if not isinstance(password, str):
+        return False
+    return password.strip().lower() not in COMMON_PASSWORDS
+
+def not_too_repetitive(password, max_run=3):
+    """
+    Extra rule: reject passwords with long repeated runs like 'aaaa' or '1111'.
+    max_run=3 means 'aaaa' fails, but 'aaa' is okay.
+    """
+    if not isinstance(password, str) or not password:
+        return False
+
+    run = 1
+    for i in range(1, len(password)):
+        if password[i] == password[i - 1]:
+            run += 1
+            if run > max_run:
+                return False
+        else:
+            run = 1
+    return True
+
+
+
+# Part B
+def validate_password(password):
+    """
+    Returns a dictionary of rule results + overall validity.
+    Also includes an advanced score + list of issues.
+    """
+    results = {
+        "min_length": check_min_length(password, 8),
+        "uppercase": has_uppercase(password),
+        "lowercase": has_lowercase(password),
+        "digit": has_digit(password),
+        "special_char": has_special_char(password),
+
+        # extra rules (complexity / better security)
+        "no_whitespace": has_no_whitespace(password),
+        "not_common": not_common_password(password),
+        "not_repetitive": not_too_repetitive(password, max_run=3),
+    }
+
+    # Overall validity
+
+    core_ok = all(results[k] for k in ["min_length", "uppercase", "lowercase", "digit", "special_char"])
+    extra_ok = all(results[k] for k in ["no_whitespace", "not_common", "not_repetitive"])
+    results["is_valid"] = core_ok and extra_ok
+
+    # Score to count count how many checks passed
+    passed = sum(1 for k, v in results.items() if k != "is_valid" and v is True)
+    total = len([k for k in results.keys() if k != "is_valid"])
+    results["score"] = f"{passed}/{total}"
+
+    # Human-readable issues
+    issues = []
+    if not results["min_length"]:
+        issues.append("Too short (min 8)")
+    if not results["uppercase"]:
+        issues.append("Missing uppercase letter")
+    if not results["lowercase"]:
+        issues.append("Missing lowercase letter")
+    if not results["digit"]:
+        issues.append("Missing digit")
+    if not results["special_char"]:
+        issues.append("Missing special character")
+    if not results["no_whitespace"]:
+        issues.append("Contains whitespace")
+    if not results["not_common"]:
+        issues.append("Too common / easily guessed")
+    if not results["not_repetitive"]:
+        issues.append("Too repetitive (e.g., aaaa)")
+
+    results["issues"] = issues
+    return results
+
+
+# ----------------------------
+# Part C: UI + random messages
+# ----------------------------
+ENCOURAGEMENT = [
+    "Almost there — tighten it up a bit ",
+    "Good effort! Add a little complexity and you're set ",
+    "Not bad — try mixing cases, digits, and symbols ",
+]
+
+HINTS = [
+    "Tip: Use at least one symbol from !@#$%^&*",
+    "Tip: Avoid spaces; they can cause copy/paste issues",
+    "Tip: Don’t use common passwords like 'password123'",
+]
+
+def generate_strong_password(length=12):
+    """
+    Generates a password that meets the *core* 5 rules.
+    Uses random (as required by the lab sheet).
+    """
+    if length < 8:
+        length = 8
+
+    upper = random.choice(string.ascii_uppercase)
+    lower = random.choice(string.ascii_lowercase)
+    digit = random.choice(string.digits)
+    special = random.choice(string.punctuation)
+
+    remaining_len = length - 4
+    all_chars = string.ascii_letters + string.digits + string.punctuation
+    remaining = [random.choice(all_chars) for _ in range(remaining_len)]
+
+    chars = [upper, lower, digit, special] + remaining
+    random.shuffle(chars)
+    return "".join(chars)
+
+
+def print_report(report):
+    # Pretty feedback lines
+    labels = {
+        "min_length": "Minimum length (>=8)",
+        "uppercase": "Has uppercase",
+        "lowercase": "Has lowercase",
+        "digit": "Has digit",
+        "special_char": "Has special character",
+        "no_whitespace": "No whitespace",
+        "not_common": "Not a common password",
+        "not_repetitive": "Not too repetitive",
+    }
+
+    for key in labels:
+        mark = "✓" if report.get(key) else "✗"
+        print(f"{mark} {labels[key]}")
+
+    print(f"Score: {report['score']}")
+    print("Overall:", "Strong ✅" if report["is_valid"] else "Weak ❌")
+
+    if report["issues"]:
+        print("Issues:", "; ".join(report["issues"]))
+
+
+def main():
+    print("=== Password Validator (Week 5) ===")
+    pw = input("Enter a password to test: ")
+
+    report = validate_password(pw)
+    print_report(report)
+
+    if not report["is_valid"]:
+        print("\n" + random.choice(ENCOURAGEMENT))
+        print(random.choice(HINTS))
+        print("Suggested strong password:", generate_strong_password(12))
+
+
+if __name__ == "__main__":
+    main()
+
+
+# In[ ]:
+
+
+
+
