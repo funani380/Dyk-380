@@ -1,0 +1,61 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[3]:
+
+
+# Exercise 3: Password Policy Validator (learned: reason list + one-pass scan)
+
+passwords = ["Pass123", "SecurePassword1", "weak", "MyP@ssw0rd", "NOLOWER123"]
+
+print("Validating passwords...")
+
+compliant = 0
+non_compliant = 0
+
+for pw in passwords:
+    #  treat non-strings as instant fail
+    if not isinstance(pw, str):
+        non_compliant += 1
+        print(f"FAIL: {pw!r} - Invalid type (must be a string)")
+        continue
+
+    has_upper = False
+    has_lower = False
+    has_digit = False
+
+    # One pass over characters
+    for ch in pw:
+        if "A" <= ch <= "Z":
+            has_upper = True
+        elif "a" <= ch <= "z":
+            has_lower = True
+        elif "0" <= ch <= "9":
+            has_digit = True
+
+    reasons = []
+    if len(pw) < 8:
+        reasons.append("Too short")
+    if not has_upper:
+        reasons.append("No uppercase")
+    if not has_lower:
+        reasons.append("No lowercase letters")
+    if not has_digit:
+        reasons.append("No digits")
+
+    if reasons:
+        non_compliant += 1
+        print(f"FAIL: '{pw}' - " + ", ".join(reasons))
+    else:
+        compliant += 1
+        print(f"PASS: '{pw}' - Meets all requirements")
+
+print(f"Summary: {compliant} compliant, {non_compliant} non-compliant")
+
+
+
+# In[ ]:
+
+
+
+
