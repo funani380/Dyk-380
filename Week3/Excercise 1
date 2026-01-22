@@ -1,0 +1,76 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+
+
+
+# In[1]:
+
+
+def grade_from_score(score: float) -> str:
+    # Basic letter gradee
+    if score >= 90:
+        letter = "A"
+    elif score >= 80:
+        letter = "B"
+    elif score >= 70:
+        letter = "C"
+    elif score >= 60:
+        letter = "D"
+    else:
+        letter = "F"
+
+    #  adding + / - for more detail (except for F)
+    if letter != "F":
+        last_digit = int(score) % 10
+        if last_digit >= 7 and score < 100:
+            letter += "+"
+        elif last_digit <= 2:
+            letter += "-"
+    return letter
+
+
+def main():
+    while True:
+        raw = input("Enter your score (0–100): ").strip()
+
+        try:
+            score = float(raw)
+        except ValueError:
+            print("Please enter a number (e.g., 85 or 92.5).")
+            continue
+
+        if not (0 <= score <= 100):
+            print("Score must be between 0 and 100.")
+            continue
+
+        grade = grade_from_score(score)
+        print(f"Your grade is: {grade}")
+
+        # Encouragement notes
+        if grade.startswith("A"):
+            print("Excellent work! Keep it up 🔥")
+        elif grade.startswith("B"):
+            print("Very good! You're close to an A.")
+        elif grade.startswith("C"):
+            print("Good effort—review a bit and you’ll improve.")
+        elif grade.startswith("D"):
+            print("You passed, but you should revise key topics.")
+        else:
+            print("Don’t panic—let’s build a study plan and try again.")
+
+        break
+
+
+if __name__ == "__main__":
+    main()
+
+
+# In[ ]:
+
+
+
+
