@@ -1,0 +1,119 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+# user_store.py
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from threading import Lock
+from typing import Any, Dict, List, Optional
+
+
+class UserStore:
+    """
+    Stores users in a JSON-Lines text file (one JSON object per line).
+    Example users.txt:
+      {"id":1,"name":"Alice","email":"a@b.com","age":22}
+      {"id":2,"name":"Bob","email":null,"age":30}
+    """
+
+    def __init__(self, file_path: str | Path):
+        self.file_path = Path(file_path)
+        self._lock = Lock()
+
+    def load(self) -> List[Dict[str, Any]]:
+        """
+        Returns list of user dicts.
+        Handles FileNotFoundError gracefully by returning [].
+        Also supports backward compatibility: if file contains a JSON list (old format),
+        it will load it and return the list.
+        """
+        with self._lock:
+            try:
+                raw = self.file_path.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                return []
+
+            if not raw:
+                return []
+
+            if raw.startswith("["):
+                data = json.loads(raw)
+                if not isinstance(data, list):
+                    raise ValueError("File contains JSON but not a list")
+                return data
+
+            users: List[Dict[str, Any]] = []
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                users.append(json.loads(line))
+            return users
+
+    def save(self, users: List[Dict[str, Any]]) -> None:
+        """
+        Writes users as JSON Lines (one JSON object per line).
+        Uses atomic replace to prevent file corruption.
+        """
+        with self._lock:
+            self.file_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.file_path.with_suffix(".tmp")
+
+            lines = []
+            for u in users:
+                lines.append(json.dumps(u, ensure_ascii=False))
+
+            tmp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+            os.replace(tmp, self.file_path)
+
+    def find_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Returns user dict if found else None.
+        """
+        users = self.load()
+        for u in users:
+            if u.get("id") == user_id:
+                return u
+        return None
+
+   
+    def update_user(self, user_id: int, updated_data: Dict[str, Any]) -> bool:
+        """
+        Updates user by ID. Returns True if updated, False if not found.
+        """
+        with self._lock:
+            users = self.load()
+            for i, u in enumerate(users):
+                if u.get("id") == user_id:
+                    # Keep id stable
+                    updated = {**u, **updated_data, "id": user_id}
+                    users[i] = updated
+                    self.save(users)
+                    return True
+            return False
+
+    def delete_user(self, user_id: int) -> bool:
+        """
+        Deletes user by ID. Returns True if deleted, False if not found.
+        """
+        with self._lock:
+            users = self.load()
+            for i, u in enumerate(users):
+                if u.get("id") == user_id:
+                    users.pop(i)
+                    self.save(users)
+                    return True
+            return False
+
+
+# In[ ]:
+
+
+
+
