@@ -1,0 +1,169 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[2]:
+
+
+# user_store.py
+import sqlite3
+import json
+from typing import Any, Dict, List, Optional
+
+
+class UserStore:
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        """
+        Create a new connection per operation (recommended for FastAPI).
+        check_same_thread=False helps when FastAPI runs multiple threads.
+        """
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+
+      
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        return conn
+
+    def init_db(self) -> None:
+        """
+        Creates the users table if it doesn't exist.
+        We'll store full user dict as JSON, but also keep id as INTEGER PK.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_json TEXT NOT NULL
+                );
+                """
+            )
+            conn.commit()
+
+    def load(self) -> List[Dict[str, Any]]:
+        """
+        Returns list of user dictionaries from database.
+        Ensures each dict includes an 'id' field consistent with DB id.
+        """
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, user_json FROM users ORDER BY id;").fetchall()
+
+        users: List[Dict[str, Any]] = []
+        for r in rows:
+            data = json.loads(r["user_json"])
+            data["id"] = r["id"]  # authoritative id from DB
+            users.append(data)
+        return users
+
+    def save(self, users: List[Dict[str, Any]]) -> None:
+        """
+        Inserts or updates users in the database.
+
+        - If dict has no 'id' or id is None: INSERT new row.
+        - If dict has an id: UPSERT (insert or update).
+        """
+        if not isinstance(users, list):
+            raise TypeError("save(users) expects a list of user dictionaries")
+
+        with self._connect() as conn:
+            for u in users:
+                if not isinstance(u, dict):
+                    raise TypeError("Each user must be a dict")
+
+                user_id = u.get("id", None)
+
+            
+                payload = dict(u)
+                payload.pop("id", None)
+                user_json = json.dumps(payload, ensure_ascii=False)
+
+                if user_id is None:
+                    # Insert new user
+                    cur = conn.execute(
+                        "INSERT INTO users (user_json) VALUES (?);",
+                        (user_json,),
+                    )
+                    # Optional: update the in-memory dict with DB id (useful in POST)
+                    u["id"] = cur.lastrowid
+                else:
+                    # Upsert by id: insert if missing, otherwise update
+                    conn.execute(
+                        """
+                        INSERT INTO users (id, user_json)
+                        VALUES (?, ?)
+                        ON CONFLICT(id) DO UPDATE SET user_json=excluded.user_json;
+                        """,
+                        (int(user_id), user_json),
+                    )
+
+            conn.commit()
+
+    def find_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Returns user dict or None using SQL query.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, user_json FROM users WHERE id = ?;",
+                (int(user_id),),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        data = json.loads(row["user_json"])
+        data["id"] = row["id"]
+        return data
+
+    def update_user(self, user_id: int, updated_data: Dict[str, Any]) -> bool:
+        """
+        Update a user by ID using SQL UPDATE.
+        Strategy (robust):
+        - Load existing user
+        - Merge fields with updated_data
+        - Write back JSON
+        Returns True if updated, False if user not found.
+        """
+        existing = self.find_by_id(user_id)
+        if existing is None:
+            return False
+
+      
+        merged = dict(existing)
+        merged.update(updated_data)
+        merged["id"] = int(user_id)
+
+        # Persist: update row JSON (without id inside json)
+        payload = dict(merged)
+        payload.pop("id", None)
+        user_json = json.dumps(payload, ensure_ascii=False)
+
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE users SET user_json = ? WHERE id = ?;",
+                (user_json, int(user_id)),
+            )
+            conn.commit()
+
+        return cur.rowcount > 0
+
+    def delete_user(self, user_id: int) -> bool:
+        """
+        Remove a user by ID using SQL DELETE.
+        Returns True if deleted, False if not found.
+        """
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM users WHERE id = ?;", (int(user_id),))
+            conn.commit()
+        return cur.rowcount > 0
+
+
+# In[ ]:
+
+
+
+
