@@ -1,0 +1,50 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+LAB 14 — EXERCISE 03 + EXERCISE 04 (SAME SHEET)
+
+
+-----------------------------------------
+EXERCISE 03 — TEST CRUD OPERATIONS (cURL)
+-----------------------------------------
+1) GET all users (should be [] if empty)
+   curl http://127.0.0.1:8000/users
+
+2) POST create a user
+   curl -X POST http://127.0.0.1:8000/users \
+     -H "Content-Type: application/json" \
+     -d '{"name":"Alice Johnson","email":"alice@example.com","age":28}'
+
+3) GET again (should include Alice)
+   curl http://127.0.0.1:8000/users
+
+4) Persistence test (stop server, restart, then GET again)
+   uvicorn main:app --reload
+   curl http://127.0.0.1:8000/users
+
+
+EXERCISE 04 — EXTEND FUNCTIONALITY (PUT + DELETE)
+
+5) PUT update a user (update user with id=1)
+   curl -X PUT http://127.0.0.1:8000/users/1 \
+     -H "Content-Type: application/json" \
+     -d '{"name":"Alice Updated","email":"alice@example.com","age":29}'
+
+6) DELETE a user (delete user with id=1)
+   curl -X DELETE http://127.0.0.1:8000/users/1
+
+7) Confirm delete (GET should no longer show id=1)
+   curl http://127.0.0.1:8000/users
+
+
+
+EXPECTED users.txt FORMAT (JSON LINES)
+
+After creating 2 users, users.txt should look like:
+
+{"id": 1, "name": "Alice Johnson", "email": "alice@example.com", "age": 28}
+{"id": 2, "name": "Bob Smith", "email": null, "age": 30}
+
