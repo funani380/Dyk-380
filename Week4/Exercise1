@@ -1,0 +1,68 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[3]:
+
+
+# Exercise 1: Failed Login Detector (no imports, no functions)
+
+login_attempts = [
+    ("alice", "success"),
+    ("bob", "failed"),
+    ("bob", "failed"),
+    ("charlie", "success"),
+    ("bob", "failed"),
+    ("alice", "failed"),
+]
+
+print("Checking login attempts...")
+
+failed_counts = {}     
+failed_indices = {}     
+unknown_records = 0
+
+for i, attempt in enumerate(login_attempts, start=1):
+    # Defensive unpacking
+    if not isinstance(attempt, tuple) or len(attempt) != 2:
+        unknown_records += 1
+        continue
+
+    user, status = attempt
+
+    # Defensive validation
+    if not isinstance(user, str) or not isinstance(status, str):
+        unknown_records += 1
+        continue
+
+    status = status.strip().lower()
+    if status not in ("success", "failed"):
+        unknown_records += 1
+        continue
+
+    if status == "failed":
+        failed_counts[user] = failed_counts.get(user, 0) + 1
+        if user not in failed_indices:
+            failed_indices[user] = []
+        failed_indices[user].append(i)
+
+# Alert phase (sorted for consistent output)
+alerted_any = False
+for user in sorted(failed_counts):
+    if failed_counts[user] >= 3:
+        alerted_any = True
+        print(f"ALERT: User '{user}' has {failed_counts[user]} failed login attempts")
+
+print("Security check complete")
+
+# (Optional audit info
+if unknown_records:
+    print(f"Note: {unknown_records} malformed/unknown records were ignored.")
+for user in sorted(failed_indices):
+    print(f"Audit: '{user}' failures occurred at attempts {failed_indices[user]}")
+
+
+# In[ ]:
+
+
+
+
