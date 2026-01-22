@@ -1,0 +1,67 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+import time
+import hashlib
+
+def hash_pin(pin: str) -> str:
+    return hashlib.sha256(pin.encode("utf-8")).hexdigest()
+
+def read_pin(prompt: str = "Enter your PIN: ") -> str:
+    # Hides the pin in most terminals; if not available, falls back to normal input
+    try:
+        import getpass
+        return getpass.getpass(prompt)
+    except Exception:
+        return input(prompt)
+
+def main():
+    # Instead of storing the plain PIN)
+    correct_pin_hash = hash_pin("1234")
+
+    max_attempts = 3
+    attempts_left = max_attempts
+
+    while attempts_left > 0:
+        print(f"Attempts left: {attempts_left}")
+        entered = read_pin()
+
+        if hash_pin(entered) == correct_pin_hash:
+            print("PIN accepted! Welcome.")
+            return
+        else:
+            print("Incorrect PIN.")
+            attempts_left -= 1
+
+    #  short countdown
+    lock_seconds = 10
+    print("Too many incorrect attempts. Account locked.")
+    for remaining in range(lock_seconds, 0, -1):
+        print(f"Try again in {remaining}s...", end="\r")
+        time.sleep(1)
+    print("\nLockout finished. Restart the program to try again.")
+
+if __name__ == "__main__":
+    main()
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
+
+# In[ ]:
+
+
+
+
