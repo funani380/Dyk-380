@@ -1,0 +1,133 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+# Exercise 3: Personal Expense Tracker
+
+from datetime import datetime
+
+def _clean_category(s: str) -> str:
+    return " ".join(s.strip().split()).title()
+
+def _prompt_int_range(prompt: str, lo: int, hi: int) -> int:
+    while True:
+        raw = input(prompt).strip()
+        try:
+            val = int(raw)
+            if lo <= val <= hi:
+                return val
+            print(f"Please enter a number between {lo} and {hi}.")
+        except ValueError:
+            print("Please enter a whole number.")
+
+def _prompt_amount(prompt: str) -> float:
+    while True:
+        raw = input(prompt).strip()
+        try:
+            amt = float(raw)
+            if amt > 0:
+                return amt
+            print("Amount must be > 0.")
+        except ValueError:
+            print("Please enter a valid number (e.g., 12.50).")
+
+def _prompt_date(prompt: str) -> str:
+    while True:
+        raw = input(prompt).strip()
+        try:
+            # Validate format and real calendar date
+            dt = datetime.strptime(raw, "%Y-%m-%d").date()
+            return dt.isoformat()
+        except ValueError:
+            print("Invalid date. Use YYYY-MM-DD (example: 2023-10-26).")
+
+def _ascii_bar_chart(category_totals: dict, width: int = 35) -> None:
+    if not category_totals:
+        return
+    max_total = max(category_totals.values())
+    if max_total <= 0:
+        return
+    print("\n=== SPENDING CHART (ASCII) ===")
+    for cat in sorted(category_totals):
+        total = category_totals[cat]
+        bar_len = int((total / max_total) * width) if max_total else 0
+        print(f"{cat:<15} | {'#' * bar_len} ${total:.2f}")
+
+print("=== PERSONAL EXPENSE TRACKER ===")
+
+n = _prompt_int_range("How many expenses do you want to enter (5-7)? ", 5, 7)
+
+expense_records = []    
+category_totals = {}    
+unique_categories = set()  
+# Collect expenses
+for i in range(1, n + 1):
+    category = _clean_category(input(f"Enter expense {i} category: "))
+    while not category:
+        category = _clean_category(input("Category cannot be empty. Enter again: "))
+
+    amount = _prompt_amount(f"Enter expense {i} amount: ")
+    date_str = _prompt_date(f"Enter expense {i} date (YYYY-MM-DD): ")
+
+    expense_records.append((category, amount, date_str))
+
+
+use_filter = input("\nFilter report? (y/n): ").strip().lower() == "y"
+filtered = expense_records
+
+if use_filter:
+    mode = input("Filter by (1) Category or (2) Date range? Enter 1/2: ").strip()
+    if mode == "1":
+        want = _clean_category(input("Enter category to include: "))
+        filtered = [r for r in expense_records if r[0] == want]
+    elif mode == "2":
+        start = _prompt_date("Start date (YYYY-MM-DD): ")
+        end = _prompt_date("End date (YYYY-MM-DD): ")
+        filtered = [r for r in expense_records if start <= r[2] <= end]
+
+# Categorize + sums
+for category, amount, date_str in filtered:
+    unique_categories.add(category)
+    category_totals[category] = category_totals.get(category, 0.0) + amount
+
+# Overall stats
+amounts = [amt for _, amt, _ in filtered]
+overall_stats = {}
+overall_stats["total_spending"] = sum(amounts)
+overall_stats["average_expense"] = overall_stats["total_spending"] / len(amounts) if amounts else 0.0
+
+highest_record = max(filtered, key=lambda x: x[1]) if filtered else None
+lowest_record = min(filtered, key=lambda x: x[1]) if filtered else None
+
+overall_stats["highest_expense"] = highest_record[1] if highest_record else 0.0
+overall_stats["lowest_expense"] = lowest_record[1] if lowest_record else 0.0
+
+#  (matches sheet format)
+print("\n=== OVERALL SPENDING SUMMARY ===")
+print(f"Total Spending: ${overall_stats['total_spending']:.2f}")
+print(f"Average Expense: ${overall_stats['average_expense']:.2f}")
+
+if highest_record:
+    print(f"Highest Expense: ${highest_record[1]:.2f} (Category: {highest_record[0]}, Date: {highest_record[2]})")
+if lowest_record:
+    print(f"Lowest Expense: ${lowest_record[1]:.2f} (Category: {lowest_record[0]}, Date: {lowest_record[2]})")
+
+print("\n=== UNIQUE CATEGORIES SPENT ON ===")
+print(unique_categories)
+print(f"Total unique categories: {len(unique_categories)}")
+
+print("\n=== SPENDING BY CATEGORY ===")
+for category in sorted(category_totals):
+    print(f"{category}: ${category_totals[category]:.2f}")
+
+# Extra chart
+_ascii_bar_chart(category_totals)
+
+
+# In[ ]:
+
+
+
+
