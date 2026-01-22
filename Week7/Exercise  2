@@ -1,0 +1,206 @@
+import re
+import logging
+from datetime import datetime
+from collections import Counter
+
+# --- Simple Apache log parser (works for common/combined formats) ---
+LOG_RE = re.compile(
+    r'^(?P<ip>\S+)\s+\S+\s+\S+\s+\[(?P<ts>[^\]]+)\]\s+'
+    r'"(?P<method>[A-Z]+)\s+(?P<url>\S+)(?:\s+[^"]+)?"\s+'
+    r'(?P<status>\d{3})\s+(?P<size>\S+)'
+    r'(?:\s+"[^"]*"\s+"(?P<ua>[^"]*)")?\s*$'
+)
+
+TS_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
+
+ALLOWED_METHODS = {"GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH"}
+
+SUSPICIOUS_PATHS = ["/admin", "/wp-admin", "/phpmyadmin", "/.env", "/cgi-bin", "../", "/etc/passwd"]
+SQLI_KEYWORDS = ["union", "select", " or 1=1", "drop", "information_schema", "sleep(", "benchmark("]
+SUSPICIOUS_UA = ["sqlmap", "nikto", "nmap", "masscan", "acunetix", "dirbuster", "hydra"]
+
+
+def setup_logging():
+    logging.basicConfig(
+        filename="analysis_audit.log",
+        filemode="w",
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
+
+def parse_line(line: str, line_no: int):
+    """
+    Returns dict with parsed fields or None for malformed lines.
+    """
+    m = LOG_RE.match(line.strip())
+    if not m:
+        logging.error("Malformed line %d: %r", line_no, line.strip()[:200])
+        return None
+
+    try:
+        ip = m.group("ip")
+        ts_raw = m.group("ts")
+        # If timestamp parsing fails, we keep raw string (still useful)
+        try:
+            ts = datetime.strptime(ts_raw, TS_FORMAT)
+            ts_out = ts.isoformat()
+        except Exception:
+            ts_out = ts_raw  # fallback
+
+        method = m.group("method")
+        url = m.group("url")
+        status = int(m.group("status"))
+        size_raw = m.group("size")
+        size = 0 if size_raw == "-" else int(size_raw)
+        ua = m.group("ua") or ""
+
+        return {"ip": ip, "ts": ts_out, "method": method, "url": url, "status": status, "size": size, "ua": ua}
+    except Exception as e:
+        logging.exception("Parse error line %d: %s", line_no, e)
+        return None
+
+
+def is_suspicious(entry):
+    """
+    Simple security rules; returns list of incident tags for this entry.
+    """
+    tags = []
+    url_l = entry["url"].lower()
+    ua_l = entry["ua"].lower()
+
+    if entry["method"] not in ALLOWED_METHODS:
+        tags.append("UNUSUAL_METHOD")
+
+    if entry["status"] == 401:
+        tags.append("AUTH_FAIL")
+
+    if entry["status"] == 403:
+        tags.append("FORBIDDEN")
+
+    if any(p in url_l for p in SUSPICIOUS_PATHS):
+        tags.append("SUSPICIOUS_PATH")
+
+    if any(k in url_l for k in SQLI_KEYWORDS):
+        tags.append("POSSIBLE_SQLI")
+
+    if any(s in ua_l for s in SUSPICIOUS_UA):
+        tags.append("SUSPICIOUS_UA")
+
+    return tags
+
+
+def main():
+    setup_logging()
+    input_file = "access.log"
+
+    total = 0
+    bytes_total = 0
+
+    ip_counts = Counter()
+    method_counts = Counter()
+    url_counts = Counter()
+    status_counts = Counter()
+
+    incidents = []   # lines for security_incidents.txt
+    error_lines = [] # lines for error_log.txt (all 4xx/5xx)
+
+    try:
+        with open(input_file, "r", encoding="utf-8", errors="replace") as f:
+            for line_no, line in enumerate(f, start=1):
+                entry = parse_line(line, line_no)
+                if entry is None:
+                    continue
+
+                total += 1
+                bytes_total += entry["size"]
+
+                ip_counts[entry["ip"]] += 1
+                method_counts[entry["method"]] += 1
+                url_counts[entry["url"]] += 1
+                status_counts[entry["status"]] += 1
+
+                # collect error lines
+                if 400 <= entry["status"] <= 599:
+                    error_lines.append(
+                        f'{entry["ts"]} {entry["ip"]} "{entry["method"]} {entry["url"]}" {entry["status"]} {entry["size"]} UA={entry["ua"]!r}'
+                    )
+
+                # security incidents
+                tags = is_suspicious(entry)
+                if tags:
+                    incident_line = (
+                        f'[{",".join(tags)}] {entry["ts"]} {entry["ip"]} '
+                        f'"{entry["method"]} {entry["url"]}" {entry["status"]} UA={entry["ua"]!r}'
+                    )
+                    incidents.append(incident_line)
+
+        logging.info("Finished reading %s. Parsed entries=%d", input_file, total)
+
+    except FileNotFoundError:
+        logging.error("Missing input file: %s", input_file)
+        print(f"ERROR: Missing input file: {input_file}")
+        return
+    except PermissionError:
+        logging.error("No permission to read: %s", input_file)
+        print(f"ERROR: No permission to read: {input_file}")
+        return
+
+    unique_visitors = len(ip_counts)
+    total_errors = sum(cnt for status, cnt in status_counts.items() if 400 <= status <= 599)
+    error_rate = (total_errors / total * 100) if total else 0.0
+
+    # --- Write outputs ---
+    try:
+        with open("summary_report.txt", "w", encoding="utf-8") as out:
+            out.write("SUMMARY REPORT\n")
+            out.write("=" * 60 + "\n")
+            out.write(f"Total requests processed: {total}\n")
+            out.write(f"Unique visitors (IPs): {unique_visitors}\n")
+            out.write(f"Total bytes served: {bytes_total}\n")
+            out.write(f"HTTP error rate (4xx+5xx): {error_rate:.2f}% ({total_errors}/{total})\n\n")
+
+            out.write("Requests per method:\n")
+            for m, c in method_counts.most_common():
+                out.write(f"  {m}: {c}\n")
+
+            out.write("\nTop 10 URLs:\n")
+            for url, c in url_counts.most_common(10):
+                out.write(f"  {c:>6}  {url}\n")
+
+            out.write("\nTop 5 IPs:\n")
+            for ip, c in ip_counts.most_common(5):
+                out.write(f"  {c:>6}  {ip}\n")
+
+            out.write("\nStatus codes:\n")
+            for status in sorted(status_counts):
+                out.write(f"  {status}: {status_counts[status]}\n")
+
+        with open("security_incidents.txt", "w", encoding="utf-8") as out:
+            out.write("SECURITY INCIDENTS\n")
+            out.write("=" * 60 + "\n")
+            out.write(f"Total incidents: {len(incidents)}\n\n")
+            for line in incidents:
+                out.write(line + "\n")
+
+        with open("error_log.txt", "w", encoding="utf-8") as out:
+            out.write("HTTP ERRORS (4xx and 5xx)\n")
+            out.write("=" * 60 + "\n")
+            for line in error_lines:
+                out.write(line + "\n")
+
+        logging.info("Wrote outputs: summary_report.txt, security_incidents.txt, error_log.txt, analysis_audit.log")
+
+        print("Done. Generated files:")
+        print(" - summary_report.txt")
+        print(" - security_incidents.txt")
+        print(" - error_log.txt")
+        print(" - analysis_audit.log")
+
+    except PermissionError:
+        logging.error("Permission error while writing output files")
+        print("ERROR: Cannot write output files (permission denied).")
+
+
+if __name__ == "__main__":
+    main()
