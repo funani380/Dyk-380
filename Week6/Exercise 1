@@ -1,0 +1,84 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+# Exercise 1: Personal Music Library Manager
+
+NUM_SONGS = 5
+
+def _clean_text(s: str) -> str:
+    return " ".join(s.strip().split())
+
+def _normalize_genre(g: str) -> str:
+    # Making genre counting consistent: "rock", "Rock", "ROCK" -> "Rock"
+    g = _clean_text(g)
+    return g.title()
+
+def _prompt_nonempty(prompt: str) -> str:
+    while True:
+        val = input(prompt)
+        val = _clean_text(val)
+        if val:
+            return val
+        print("Please enter something (cannot be empty).")
+
+def _most_popular_genres(genre_count: dict) -> list:
+    # Handle ties: if Rock=3 and Pop=3 -> return ["Pop","Rock"] (sorted)
+    if not genre_count:
+        return []
+    max_count = max(genre_count.values())
+    winners = [g for g, c in genre_count.items() if c == max_count]
+    return sorted(winners)
+
+print("Welcome to Music Library Manager!")
+
+songs = []          
+genre_count = {}   
+
+
+library = []  # list of dicts: {"title":..., "genre":...}
+
+for i in range(1, NUM_SONGS + 1):
+    print(f"\nEnter Song {i}:")
+    title = _prompt_nonempty(" Song name: ")
+    genre_raw = _prompt_nonempty(" Genre: ")
+    genre = _normalize_genre(genre_raw)
+
+    # Required tuple storage
+    songs.append((title, genre))
+
+    # Required counting using .get
+    genre_count[genre] = genre_count.get(genre, 0) + 1
+
+    # Extra richer record (optional)
+    library.append({"title": title, "genre": genre})
+
+# Display results 
+print("\n=== YOUR MUSIC LIBRARY ===")
+for idx, (title, genre) in enumerate(songs, start=1):
+    print(f"{idx}. {title} ({genre})")
+
+print("\n=== GENRE STATISTICS ===")
+for g in sorted(genre_count):  # sorted for professional output
+    print(f"{g}: {genre_count[g]} songs")
+
+winners = _most_popular_genres(genre_count)
+if not winners:
+    print("Most popular genre: N/A")
+elif len(winners) == 1:
+    print(f"Most popular genre: {winners[0]}")
+else:
+    print(f"Most popular genre (tie): {', '.join(winners)}")
+
+#  quick summary
+print(f"\nTotal songs: {len(songs)}")
+print(f"Total unique genres: {len(genre_count)}")
+
+
+# In[ ]:
+
+
+
+
