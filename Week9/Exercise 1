@@ -1,0 +1,616 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[2]:
+
+
+#!/usr/bin/env python3
+"""
+Exercise 1 + Exercise 2 (More Complex Solution)
+
+Adds "enterprise-style" upgrades vs the original:
+- Stronger RBAC (roles + action policy)
+- Explicit device lifecycle state (ACTIVE/INACTIVE/QUARANTINED/RETIRED)
+- SemVer parsing + comparison (no regex-only validation)
+- Compliance engine configurable by policy (scan age per device type)
+- Risk scoring + richer reporting
+- Centralized audit log (fleet-level) + per-device log
+- JSON persistence (save/load inventory)
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
+import json
+import threading
+import logging
+
+
+# -----------------------------
+# Utilities
+# -----------------------------
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+def iso(ts: datetime) -> str:
+    return ts.isoformat().replace("+00:00", "Z")
+
+def require_nonempty(name: str, value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    v = value.strip()
+    if not v:
+        raise ValueError(f"{name} cannot be empty")
+    return v
+
+
+# -----------------------------
+# SemVer (simple, strict)
+# -----------------------------
+
+def parse_semver(v: str) -> Tuple[int, int, int]:
+    """
+    Strict X.Y.Z where X,Y,Z are non-negative integers.
+    """
+    v = require_nonempty("firmware_version", v)
+    parts = v.split(".")
+    if len(parts) != 3:
+        raise ValueError("firmware_version must look like X.Y.Z (e.g., 1.2.3)")
+    try:
+        major, minor, patch = (int(p) for p in parts)
+    except ValueError:
+        raise ValueError("firmware_version parts must be integers (e.g., 1.2.3)")
+    if major < 0 or minor < 0 or patch < 0:
+        raise ValueError("firmware_version parts must be non-negative")
+    return major, minor, patch
+
+def semver_gt(a: str, b: str) -> bool:
+    return parse_semver(a) > parse_semver(b)
+
+
+# -----------------------------
+# Exercise 1: Users + privileges
+# -----------------------------
+
+class Role(str, Enum):
+    ADMIN = "admin"
+    STANDARD = "standard"
+    GUEST = "guest"
+
+@dataclass(frozen=True)
+class User:
+    username: str
+    role: Role = Role.STANDARD
+
+    def __post_init__(self):
+        object.__setattr__(self, "username", require_nonempty("username", self.username))
+
+    def is_admin(self) -> bool:
+        return self.role == Role.ADMIN
+
+
+# -----------------------------
+# Audit + domain models
+# -----------------------------
+
+class DeviceState(str, Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    QUARANTINED = "quarantined"
+    RETIRED = "retired"
+
+class Action(str, Enum):
+    CONTROL_STREAM = "CONTROL_STREAM"
+    UNLOCK_DOOR = "UNLOCK_DOOR"
+    FW_UPDATE = "FW_UPDATE"
+    RUN_SCAN = "RUN_SCAN"
+    QUARANTINE = "QUARANTINE"
+    DECOMMISSION = "DECOMMISSION"
+    VIEW_INFO = "VIEW_INFO"
+
+@dataclass(frozen=True)
+class AuditEvent:
+    ts: str
+    actor: str
+    device_id: str
+    action: str
+    success: bool
+    details: Dict[str, Any]
+
+class NotAuthorised(Exception):
+    pass
+
+class PolicyViolation(Exception):
+    pass
+
+
+# -----------------------------
+# Policy Engine (configurable)
+# -----------------------------
+
+@dataclass(frozen=True)
+class CompliancePolicy:
+    """
+    - max_scan_age_default: default max scan age
+    - max_scan_age_by_type: overrides per device type
+    """
+    max_scan_age_default: timedelta = timedelta(days=30)
+    max_scan_age_by_type: Dict[str, timedelta] = None
+
+    def max_age_for(self, device_type: str) -> timedelta:
+        if self.max_scan_age_by_type and device_type in self.max_scan_age_by_type:
+            return self.max_scan_age_by_type[device_type]
+        return self.max_scan_age_default
+
+
+@dataclass(frozen=True)
+class AccessPolicy:
+    """
+    Which roles can do which actions.
+    Owners are handled separately: a STANDARD user can do some actions ONLY on own devices.
+    """
+    admin_actions: Tuple[Action, ...] = tuple(Action)
+    owner_actions: Tuple[Action, ...] = (
+        Action.VIEW_INFO,
+        Action.CONTROL_STREAM,
+        Action.UNLOCK_DOOR,
+        Action.RUN_SCAN,
+        Action.FW_UPDATE,
+    )
+    guest_actions: Tuple[Action, ...] = (Action.VIEW_INFO,)
+
+    def allowed_for(self, role: Role, action: Action) -> bool:
+        if role == Role.ADMIN:
+            return action in self.admin_actions
+        if role == Role.STANDARD:
+            return action in self.owner_actions
+        if role == Role.GUEST:
+            return action in self.guest_actions
+        return False
+
+
+# -----------------------------
+# Device
+# -----------------------------
+
+class Device:
+    """
+    More complex device model:
+    - explicit state machine
+    - compliance via policy
+    - risk scoring
+    - thread-safe state changes
+    """
+
+    def __init__(
+        self,
+        device_id: str,
+        device_type: str,
+        firmware_version: str,
+        owner: str,
+        policy: CompliancePolicy,
+        access_policy: AccessPolicy,
+        last_security_scan: Optional[datetime] = None,
+        compromised: bool = False,
+        state: DeviceState = DeviceState.ACTIVE,
+    ):
+        self._lock = threading.RLock()
+
+        self._device_id = require_nonempty("device_id", device_id)
+        self._device_type = require_nonempty("device_type", device_type)
+        self._owner = require_nonempty("owner", owner)
+
+        parse_semver(firmware_version)  # validates
+        self._firmware_version = firmware_version
+
+        self._policy = policy
+        self._access_policy = access_policy
+
+        self._last_security_scan = last_security_scan
+        self._compromised = bool(compromised)
+        self._state = state
+
+        self._events: List[AuditEvent] = []
+
+    # ---- read-only properties ----
+    @property
+    def device_id(self) -> str:
+        return self._device_id
+
+    @property
+    def owner(self) -> str:
+        return self._owner
+
+    @property
+    def device_type(self) -> str:
+        return self._device_type
+
+    @property
+    def firmware_version(self) -> str:
+        return self._firmware_version
+
+    @property
+    def state(self) -> DeviceState:
+        return self._state
+
+    @property
+    def compromised(self) -> bool:
+        return self._compromised
+
+    @property
+    def last_security_scan(self) -> Optional[datetime]:
+        return self._last_security_scan
+
+    # ---- audit ----
+    def _log(self, actor: User, action: Action, success: bool, details: Optional[Dict[str, Any]] = None) -> AuditEvent:
+        ev = AuditEvent(
+            ts=iso(utcnow()),
+            actor=actor.username,
+            device_id=self._device_id,
+            action=action.value,
+            success=success,
+            details=details or {},
+        )
+        self._events.append(ev)
+        return ev
+
+    def events(self, limit: int = 50) -> List[AuditEvent]:
+        return self._events[-limit:]
+
+    # ---- compliance + risk ----
+    def is_quarantined(self) -> bool:
+        return self._state == DeviceState.QUARANTINED
+
+    def is_active(self) -> bool:
+        return self._state == DeviceState.ACTIVE
+
+    def compliance_status(self) -> bool:
+        """
+        Non-compliant if:
+          - state != ACTIVE
+          - compromised
+          - no scan OR scan too old per policy
+        """
+        if self._state != DeviceState.ACTIVE:
+            return False
+        if self._compromised:
+            return False
+        if self._last_security_scan is None:
+            return False
+        max_age = self._policy.max_age_for(self._device_type)
+        if utcnow() - self._last_security_scan > max_age:
+            return False
+        return True
+
+    def risk_score(self) -> int:
+        """
+        Simple risk scoring (0..100):
+        - compromised => +70
+        - quarantined => +40
+        - no scan => +30
+        - stale scan => up to +30 depending on how stale
+        - inactive/retired => +10 (operational risk / unknown posture)
+        """
+        score = 0
+        if self._compromised:
+            score += 70
+        if self._state == DeviceState.QUARANTINED:
+            score += 40
+        if self._state in (DeviceState.INACTIVE, DeviceState.RETIRED):
+            score += 10
+
+        if self._last_security_scan is None:
+            score += 30
+        else:
+            max_age = self._policy.max_age_for(self._device_type)
+            age = utcnow() - self._last_security_scan
+            if age > max_age:
+                # scale extra risk by how stale, capped
+                stale_days = min(int((age - max_age).total_seconds() // 86400), 60)
+                score += min(30, 5 + stale_days // 2)
+
+        return min(100, score)
+
+    def safe_info(self) -> Dict[str, Any]:
+        return {
+            "device_id": self._device_id,
+            "device_type": self._device_type,
+            "owner": self._owner,
+            "firmware_version": self._firmware_version,
+            "state": self._state.value,
+            "compromised": self._compromised,
+            "last_security_scan": iso(self._last_security_scan) if self._last_security_scan else None,
+            "compliant": self.compliance_status(),
+            "risk_score": self.risk_score(),
+        }
+
+    # ---- authorization ----
+    def authorise(self, actor: User, action: Action, allow_admin_override: bool = False) -> bool:
+        """
+        Rules:
+        - Role must allow action by policy.
+        - ADMIN: may act on any device; if non-compliant, requires override for sensitive actions.
+        - STANDARD: only on own devices.
+        - GUEST: never on restricted actions.
+        - If quarantined: only admin may do actions (and even then, prefer override for risky actions).
+        """
+        with self._lock:
+            # 1) policy role gate
+            if not self._access_policy.allowed_for(actor.role, action):
+                self._log(actor, action, False, {"reason": "role_not_allowed"})
+                return False
+
+            # 2) ownership gate for non-admin
+            if not actor.is_admin() and actor.username != self._owner:
+                self._log(actor, action, False, {"reason": "not_owner"})
+                return False
+
+            # 3) quarantine hard gate for non-admin
+            if self.is_quarantined() and not actor.is_admin():
+                self._log(actor, action, False, {"reason": "quarantined"})
+                return False
+
+            # 4) compliance gate for sensitive actions
+            sensitive = action in (Action.CONTROL_STREAM, Action.UNLOCK_DOOR, Action.FW_UPDATE)
+            if sensitive and not self.compliance_status():
+                if actor.is_admin() and allow_admin_override:
+                    self._log(actor, action, True, {"mode": "admin_override", "note": "non_compliant"})
+                    return True
+                self._log(actor, action, False, {"reason": "non_compliant"})
+                return False
+
+            # 5) ok
+            self._log(actor, action, True, {"mode": "admin" if actor.is_admin() else "owner"})
+            return True
+
+    # ---- actions ----
+    def run_security_scan(self, actor: User, compromised_found: bool = False, notes: str = "") -> None:
+        with self._lock:
+            if not self.authorise(actor, Action.RUN_SCAN):
+                raise NotAuthorised("Not authorised to run a security scan")
+
+            self._last_security_scan = utcnow()
+
+            if compromised_found:
+                self._compromised = True
+                self._state = DeviceState.QUARANTINED
+                self._log(actor, Action.RUN_SCAN, True, {"result": "COMPROMISED", "notes": notes})
+            else:
+                self._compromised = False
+                # if it was quarantined only due to suspicion, allow returning to ACTIVE
+                if self._state == DeviceState.QUARANTINED:
+                    self._state = DeviceState.ACTIVE
+                self._log(actor, Action.RUN_SCAN, True, {"result": "CLEAN", "notes": notes})
+
+    def update_firmware(self, actor: User, new_version: str, allow_admin_override: bool = False) -> None:
+        with self._lock:
+            new_version = require_nonempty("new_version", new_version)
+            parse_semver(new_version)
+
+            if not semver_gt(new_version, self._firmware_version):
+                self._log(actor, Action.FW_UPDATE, False, {"reason": "version_not_higher", "current": self._firmware_version})
+                raise PolicyViolation("Firmware update must increase version (e.g. 1.0.0 -> 1.0.1)")
+
+            if not self.authorise(actor, Action.FW_UPDATE, allow_admin_override=allow_admin_override):
+                raise NotAuthorised("Not authorised to update firmware")
+
+            old = self._firmware_version
+            self._firmware_version = new_version
+
+            # Defensive policy: firmware update invalidates scan
+            self._last_security_scan = None
+            self._log(actor, Action.FW_UPDATE, True, {"from": old, "to": new_version, "note": "scan_required"})
+
+    def quarantine(self, actor: User, reason: str) -> None:
+        with self._lock:
+            reason = require_nonempty("reason", reason)
+            if not actor.is_admin():
+                self._log(actor, Action.QUARANTINE, False, {"reason": "not_admin"})
+                raise NotAuthorised("Only admin can quarantine devices")
+            self._state = DeviceState.QUARANTINED
+            self._log(actor, Action.QUARANTINE, True, {"reason": reason})
+
+    def decommission(self, actor: User, reason: str) -> None:
+        with self._lock:
+            reason = require_nonempty("reason", reason)
+            if not actor.is_admin():
+                self._log(actor, Action.DECOMMISSION, False, {"reason": "not_admin"})
+                raise NotAuthorised("Only admin can decommission devices")
+            self._state = DeviceState.RETIRED
+            self._log(actor, Action.DECOMMISSION, True, {"reason": reason})
+
+
+# -----------------------------
+# DeviceManager (fleet)
+# -----------------------------
+
+class DeviceManager:
+    def __init__(self, log_file: str = "fleet_audit.log"):
+        self._lock = threading.RLock()
+        self._devices: Dict[str, Device] = {}
+        self._fleet_events: List[AuditEvent] = []
+
+        self._logger = logging.getLogger("fleet")
+        self._logger.setLevel(logging.INFO)
+        self._logger.handlers.clear()
+        fh = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        self._logger.addHandler(fh)
+
+    def _fleet_log(self, ev: AuditEvent) -> None:
+        self._fleet_events.append(ev)
+        self._logger.info("device=%s actor=%s action=%s success=%s details=%s",
+                          ev.device_id, ev.actor, ev.action, ev.success, ev.details)
+
+    def add_device(self, actor: User, device: Device) -> None:
+        with self._lock:
+            if not actor.is_admin():
+                raise NotAuthorised("Only admin can add devices to inventory")
+            if device.device_id in self._devices:
+                raise ValueError("device_id already exists")
+            self._devices[device.device_id] = device
+
+    def remove_device(self, actor: User, device_id: str) -> None:
+        with self._lock:
+            if not actor.is_admin():
+                raise NotAuthorised("Only admin can remove devices")
+            device_id = require_nonempty("device_id", device_id)
+            if device_id not in self._devices:
+                raise KeyError("device not found")
+            del self._devices[device_id]
+
+    def get_device(self, device_id: str) -> Device:
+        with self._lock:
+            device_id = require_nonempty("device_id", device_id)
+            if device_id not in self._devices:
+                raise KeyError("device not found")
+            return self._devices[device_id]
+
+    def list_devices(self) -> List[Device]:
+        with self._lock:
+            return list(self._devices.values())
+
+    def security_report(self) -> Dict[str, Any]:
+        with self._lock:
+            devices = self.list_devices()
+            compliant = [d.safe_info() for d in devices if d.compliance_status()]
+            non_compliant = [d.safe_info() for d in devices if not d.compliance_status()]
+            quarantined = [d.safe_info() for d in devices if d.state == DeviceState.QUARANTINED]
+            compromised = [d.safe_info() for d in devices if d.compromised]
+            high_risk = [d.safe_info() for d in devices if d.risk_score() >= 60]
+
+            return {
+                "generated_at": iso(utcnow()),
+                "total": len(devices),
+                "compliant": compliant,
+                "non_compliant": non_compliant,
+                "quarantined": quarantined,
+                "compromised": compromised,
+                "high_risk": high_risk,
+            }
+
+    # ---- Persistence ----
+    def save_json(self, path: str) -> None:
+        with self._lock:
+            data = [d.safe_info() for d in self.list_devices()]
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+
+    @staticmethod
+    def load_json(
+        path: str,
+        policy: CompliancePolicy,
+        access_policy: AccessPolicy,
+        log_file: str = "fleet_audit.log",
+    ) -> "DeviceManager":
+        mgr = DeviceManager(log_file=log_file)
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        # Note: last_security_scan is stored as ISO string; convert back.
+        for row in raw:
+            lss = row.get("last_security_scan")
+            dt = None
+            if lss:
+                # stored like 2026-01-22T12:00:00Z
+                dt = datetime.fromisoformat(lss.replace("Z", "+00:00"))
+            dev = Device(
+                device_id=row["device_id"],
+                device_type=row["device_type"],
+                firmware_version=row["firmware_version"],
+                owner=row["owner"],
+                policy=policy,
+                access_policy=access_policy,
+                last_security_scan=dt,
+                compromised=bool(row.get("compromised", False)),
+                state=DeviceState(row.get("state", "active")),
+            )
+            mgr._devices[dev.device_id] = dev
+        return mgr
+
+
+# -----------------------------
+# Demo (like your demo_exercise_2, but richer)
+# -----------------------------
+
+def demo():
+    print("=== DEMO: Exercise 1 + 2 (Complex) ===")
+
+    # Policies (example: cameras must be scanned every 14 days, door locks every 7 days)
+    compliance_policy = CompliancePolicy(
+        max_scan_age_default=timedelta(days=30),
+        max_scan_age_by_type={
+            "camera": timedelta(days=14),
+            "door_lock": timedelta(days=7),
+        },
+    )
+    access_policy = AccessPolicy()
+
+    admin = User("sec_admin", Role.ADMIN)
+    bob = User("bob", Role.STANDARD)
+    alice = User("alice", Role.STANDARD)
+    guest = User("visitor", Role.GUEST)
+
+    mgr = DeviceManager(log_file="fleet_audit.log")
+
+    d1 = Device("cam-001", "camera", "1.0.0", owner="bob",
+                policy=compliance_policy, access_policy=access_policy,
+                last_security_scan=utcnow() - timedelta(days=5))
+    d2 = Device("lock-010", "door_lock", "2.3.1", owner="alice",
+                policy=compliance_policy, access_policy=access_policy,
+                last_security_scan=utcnow() - timedelta(days=10))  # stale for lock (7d) => non-compliant
+    d3 = Device("sensor-007", "temp_sensor", "0.9.5", owner="bob",
+                policy=compliance_policy, access_policy=access_policy,
+                last_security_scan=None)  # no scan => non-compliant
+
+    mgr.add_device(admin, d1)
+    mgr.add_device(admin, d2)
+    mgr.add_device(admin, d3)
+
+    # Guest can only view info (and only passes policy role gate; ownership not required for VIEW_INFO here)
+    print("Guest VIEW_INFO cam-001 allowed?:", d1.authorise(guest, Action.VIEW_INFO))
+
+    # Bob firmware update -> requires higher version + authorisation; afterwards scan invalidated
+    d1.update_firmware(bob, "1.0.1")
+    print("Bob CONTROL_STREAM after FW update (no scan) allowed?:",
+          d1.authorise(bob, Action.CONTROL_STREAM))
+
+    # Scan then access
+    d1.run_security_scan(bob, compromised_found=False, notes="post-update scan")
+    print("Bob CONTROL_STREAM after scan allowed?:",
+          d1.authorise(bob, Action.CONTROL_STREAM))
+
+    # Alice tries to unlock her lock (stale scan) -> denied
+    print("Alice UNLOCK_DOOR lock-010 allowed?:",
+          d2.authorise(alice, Action.UNLOCK_DOOR))
+
+    # Admin override unlock (logged)
+    print("Admin override UNLOCK_DOOR lock-010 allowed?:",
+          d2.authorise(admin, Action.UNLOCK_DOOR, allow_admin_override=True))
+
+    # Admin finds malware on sensor => quarantine
+    d3.run_security_scan(admin, compromised_found=True, notes="malware signature")
+    print("sensor-007 state:", d3.state.value, "risk:", d3.risk_score(), "compliant:", d3.compliance_status())
+
+    report = mgr.security_report()
+    print("Report summary:",
+          {k: (len(v) if isinstance(v, list) else v) for k, v in report.items() if k != "generated_at"})
+
+    # Save inventory snapshot
+    mgr.save_json("inventory_snapshot.json")
+    print("Saved inventory_snapshot.json and fleet_audit.log")
+
+
+if __name__ == "__main__":
+    demo()
+
+
+# In[ ]:
+
+
+
+
