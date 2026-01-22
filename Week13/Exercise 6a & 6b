@@ -1,0 +1,226 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+# routes/users.py
+from fastapi import APIRouter, HTTPException, Query, Path, status
+from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Optional
+from pathlib import Path as SysPath
+import json
+import os
+import re
+import random
+import time
+
+
+# 6A) SCHEMA (MODELS) 
+
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+class UserCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=60)
+    email: Optional[str] = Field(default=None, max_length=120)
+    age: Optional[int] = Field(default=None, ge=0, le=130)
+
+    def validate_email(self) -> None:
+        if self.email is not None and not EMAIL_RE.match(self.email):
+            raise ValueError("Invalid email format")
+
+class User(UserCreate):
+    id: int = Field(..., ge=1)
+
+
+
+# 6B) ROUTES + HELPERS — embedded here in the same script
+
+router = APIRouter()
+
+# users.txt is in the project root (week13/users.txt)
+BASE_DIR = SysPath(__file__).resolve().parent.parent
+DB_FILE = BASE_DIR / "users.txt"
+
+
+def _ensure_db_exists() -> None:
+    if not DB_FILE.exists():
+        DB_FILE.write_text("[]", encoding="utf-8")
+
+def read_users() -> List[Dict[str, Any]]:
+    _ensure_db_exists()
+    try:
+        raw = DB_FILE.read_text(encoding="utf-8").strip() or "[]"
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            raise ValueError("users.txt must contain a JSON list")
+        return data
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="users.txt contains invalid JSON")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read users: {e}")
+
+def write_users(users: List[Dict[str, Any]]) -> None:
+    """
+    Atomic write: write to .tmp then replace
+    (prevents corruption if the server stops mid-write)
+    """
+    _ensure_db_exists()
+    tmp = DB_FILE.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(users, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, DB_FILE)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write users: {e}")
+
+def get_next_id(users: List[Dict[str, Any]]) -> int:
+    if not users:
+        return 1
+    ids = [u.get("id") for u in users if isinstance(u.get("id"), int)]
+    return (max(ids) + 1) if ids else 1
+
+def find_user_index(users: List[Dict[str, Any]], user_id: int) -> int:
+    for i, u in enumerate(users):
+        if u.get("id") == user_id:
+            return i
+    return -1
+
+def _norm(s: str) -> str:
+    return " ".join(s.strip().split()).lower()
+
+def email_in_use(users: List[Dict[str, Any]], email: str, ignore_id: Optional[int] = None) -> bool:
+    target = email.strip().lower()
+    for u in users:
+        if ignore_id is not None and u.get("id") == ignore_id:
+            continue
+        if (u.get("email") or "").strip().lower() == target:
+            return True
+    return False
+
+
+
+@router.post(
+    "",
+    response_model=User,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a user"
+)
+def create_user(payload: UserCreate) -> Dict[str, Any]:
+    # Extra validation (more complex than minimal)
+    try:
+        payload.validate_email()
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    users = read_users()
+
+    # Optional: prevent duplicate email if provided
+    if payload.email and email_in_use(users, payload.email):
+        raise HTTPException(status_code=409, detail="Email already exists")
+
+    new_user = {"id": get_next_id(users), **payload.model_dump()}
+    users.append(new_user)
+    write_users(users)
+    return new_user
+
+
+
+@router.get(
+    "",
+    response_model=List[User],
+    summary="Get all users (pagination + sorting)"
+)
+def get_all_users(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    sort: str = Query("id", pattern="^(id|name|age)$"),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
+) -> List[Dict[str, Any]]:
+    users = read_users()
+    reverse = (order == "desc")
+
+    if sort == "name":
+        users.sort(key=lambda u: (_norm(u.get("name", "")), u.get("id", 0)), reverse=reverse)
+    elif sort == "age":
+        # Put None ages last
+        users.sort(key=lambda u: (u.get("age") is None, u.get("age", 0), u.get("id", 0)), reverse=reverse)
+    else:
+        users.sort(key=lambda u: u.get("id", 0), reverse=reverse)
+
+    return users[offset : offset + limit]
+
+
+)
+@router.get(
+    "/search",
+    response_model=List[User],
+    summary="Search users by name (case-insensitive substring)"
+)
+def search_users(q: str = Query(..., min_length=1, max_length=60)) -> List[Dict[str, Any]]:
+    users = read_users()
+    needle = q.strip().lower()
+    return [u for u in users if needle in (u.get("name", "").lower())]
+
+
+
+@router.get(
+    "/{id}",
+    response_model=User,
+    summary="Get user by ID"
+)
+def get_user_by_id(id: int = Path(..., ge=1)) -> Dict[str, Any]:
+    users = read_users()
+    idx = find_user_index(users, id)
+    if idx == -1:
+        raise HTTPException(status_code=404, detail="User not found")
+    return users[idx]
+
+
+
+@router.put(
+    "/{id}",
+    response_model=User,
+    summary="Update user by ID"
+)
+def update_user(id: int = Path(..., ge=1), payload: UserCreate = None) -> Dict[str, Any]:
+    try:
+        payload.validate_email()
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    users = read_users()
+    idx = find_user_index(users, id)
+    if idx == -1:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if payload.email and email_in_use(users, payload.email, ignore_id=id):
+        raise HTTPException(status_code=409, detail="Email already exists")
+
+    updated = {"id": id, **payload.model_dump()}
+    users[idx] = updated
+    write_users(users)
+    return updated
+
+
+
+@router.delete(
+    "/{id}",
+    summary="Delete user by ID"
+)
+def delete_user(id: int = Path(..., ge=1)) -> Dict[str, Any]:
+    users = read_users()
+    idx = find_user_index(users, id)
+    if idx == -1:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    deleted = users.pop(idx)
+    write_users(users)
+    return {"status": "deleted", "deleted_user": deleted}
+
+
+# In[ ]:
+
+
+
+
