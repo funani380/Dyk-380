@@ -1,0 +1,57 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[2]:
+
+
+# Exercise 2: Port Security Scanner (nested loops + structured findings)
+
+devices = [
+    ("192.168.1.10", [22, 80, 443]),
+    ("192.168.1.11", [21, 22, 80]),
+    ("192.168.1.12", [23, 80, 3389]),
+]
+risky_ports = [21, 23, 3389]
+
+print("Scanning network devices...")
+
+risky_set = set(risky_ports)   
+findings = []                  
+bad_records = 0
+
+for record in devices:
+    # Defensive unpacking
+    if not isinstance(record, tuple) or len(record) != 2:
+        bad_records += 1
+        continue
+
+    ip, ports = record
+    if not isinstance(ip, str) or not isinstance(ports, list):
+        bad_records += 1
+        continue
+
+    for p in ports:  
+        if isinstance(p, int) and p in risky_set:
+            findings.append((ip, p))
+            print(f"WARNING: {ip} has risky port {p} open")
+
+print(f"Scan complete: {len(findings)} security risks found")
+
+# extra intelligence
+if bad_records:
+    print(f"Note: {bad_records} invalid device records ignored.")
+
+
+per_device = {}
+for ip, p in findings:
+    per_device[ip] = per_device.get(ip, 0) + 1
+
+for ip in sorted(per_device):
+    print(f"Summary: {ip} -> {per_device[ip]} risky port(s)")
+
+
+# In[ ]:
+
+
+
+
